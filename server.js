@@ -4,6 +4,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
+import pg from "pg";
+const { Pool } = pg;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -16,6 +18,7 @@ const DEMO_INTERVAL_MS = Math.max(1200, Number(process.env.DEMO_INTERVAL_MS || 3
 const UPSTREAM_URL = process.env.UPSTREAM_API_URL || "";
 const UPSTREAM_KEY = process.env.UPSTREAM_API_KEY || "";
 const INGEST_KEY = process.env.INGEST_API_KEY || "";
+const DATABASE_URL = process.env.DATABASE_URL || "";
 const UPSTREAM_POLL_MS = Math.max(10000, Number(process.env.UPSTREAM_POLL_MS || 30000));
 
 app.disable("x-powered-by");
@@ -31,6 +34,7 @@ let demoTimer = null;
 let upstreamTimer = null;
 let sourceMode = UPSTREAM_URL ? "connecting" : "demo";
 let lastSourceSync = null;
+const pool = DATABASE_URL ? new Pool({ connectionString: DATABASE_URL, ssl: process.env.PGSSLMODE === "disable" ? false : { rejectUnauthorized: false } }) : null;
 
 function parseCsvLine(line) {
   const out=[]; let value="", quoted=false;
@@ -49,7 +53,22 @@ function normalize(row){
   return r;
 }
 function isValid(r){return Number.isInteger(r.Agent_ID)&&r.Agent_ID>0&&["A","B"].includes(r.Group)&&numeric.slice(1).every(k=>Number.isFinite(r[k])&&r[k]>=0)&&r.CSAT_Score<=100;}
-function persist(){fs.mkdirSync(DATA_DIR,{recursive:true});fs.writeFileSync(STORE_FILE,JSON.stringify({agents,events:events.slice(0,250),lastSourceSync},null,2));}
+function persist(){fs.mkdirSync(DATA_DIR,{recursive:true});fs.writeFileSync(STORE_FILE,JSON.stringify({agents,events:events.slice(0,250),lastSourceSync},null,2));if(pool)persistDatabase().catch(err=>console.error("PostgreSQL persistence error:",err.message));}
+async function persistDatabase(){
+  for(const agent of agents) await pool.query("INSERT INTO agent_records(agent_id,data,updated_at) VALUES($1,$2::jsonb,NOW()) ON CONFLICT(agent_id) DO UPDATE SET data=EXCLUDED.data,updated_at=NOW()",[agent.Agent_ID,JSON.stringify(agent)]);
+  for(const event of events.slice(0,250)) await pool.query("INSERT INTO audit_events(event_id,data,created_at) VALUES($1,$2::jsonb,$3) ON CONFLICT(event_id) DO NOTHING",[event.id,JSON.stringify(event),event.at]);
+  await pool.query("DELETE FROM audit_events WHERE created_at < NOW() - INTERVAL '30 days'");
+}
+async function initDatabase(){
+  await pool.query("CREATE TABLE IF NOT EXISTS agent_records(agent_id BIGINT PRIMARY KEY,data JSONB NOT NULL,updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
+  await pool.query("CREATE TABLE IF NOT EXISTS audit_events(event_id UUID PRIMARY KEY,data JSONB NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
+  const result=await pool.query("SELECT data FROM agent_records ORDER BY agent_id");
+  if(result.rows.length){agents=result.rows.map(row=>normalize(row.data)).filter(isValid);}
+  else {for(const agent of agents)await pool.query("INSERT INTO agent_records(agent_id,data) VALUES($1,$2::jsonb) ON CONFLICT DO NOTHING",[agent.Agent_ID,JSON.stringify(agent)]);}
+  const history=await pool.query("SELECT data FROM audit_events ORDER BY created_at DESC LIMIT 250");
+  if(history.rows.length)events=history.rows.map(row=>row.data);
+  console.log("PostgreSQL connected; loaded "+agents.length+" agent records.");
+}
 function load(){try{const saved=JSON.parse(fs.readFileSync(STORE_FILE,"utf8"));if(Array.isArray(saved.agents)&&saved.agents.length){agents=saved.agents.map(normalize).filter(isValid);events=Array.isArray(saved.events)?saved.events:[];lastSourceSync=saved.lastSourceSync||null;return;}}catch{}agents=readSeed();events=[];persist();}
 function publicEvent(type,payload){const event={id:crypto.randomUUID(),type,at:new Date().toISOString(),payload};events.unshift(event);events=events.slice(0,250);const wire="event: update\ndata: "+JSON.stringify(event)+"\n\n";for(const res of clients){try{res.write(wire);}catch{clients.delete(res);}}persist();return event;}
 function snapshot(){return {agents,events:events.slice(0,50),sourceMode,lastSourceSync,serverTime:new Date().toISOString()};}
@@ -62,10 +81,10 @@ async function pollUpstream(){if(!UPSTREAM_URL)return;try{sourceMode="api";const
 function requireIngest(req,res,next){if(!INGEST_KEY)return res.status(503).json({error:"INGEST_API_KEY is not configured on this server."});const key=req.get("X-Ingest-Key")||req.get("Authorization")?.replace(/^Bearer\s+/i,"");if(key!==INGEST_KEY)return res.status(401).json({error:"Invalid ingestion key."});next();}
 
 load();
-if(UPSTREAM_URL){pollUpstream();upstreamTimer=setInterval(pollUpstream,UPSTREAM_POLL_MS);}else startDemo();
+(async()=>{try{if(pool)await initDatabase();if(UPSTREAM_URL){await pollUpstream();upstreamTimer=setInterval(pollUpstream,UPSTREAM_POLL_MS);}else startDemo();}catch(err){console.error("Startup data initialisation failed:",err.message);if(!UPSTREAM_URL)startDemo();}})();
 
 app.get("/api/health",(req,res)=>res.json({ok:true,service:"CALLCENTRE IQ API",version:"1.0.0",mode:sourceMode,agents:agents.length,lastSourceSync,uptimeSeconds:Math.round(process.uptime()),serverTime:new Date().toISOString()}));
-app.get("/api/config",(req,res)=>res.json({mode:sourceMode,upstreamConfigured:Boolean(UPSTREAM_URL),demoRunning:Boolean(demoTimer),lastSourceSync,ingestEnabled:Boolean(INGEST_KEY)}));
+app.get("/api/config",(req,res)=>res.json({mode:sourceMode,upstreamConfigured:Boolean(UPSTREAM_URL),databaseConfigured:Boolean(pool),demoRunning:Boolean(demoTimer),lastSourceSync,ingestEnabled:Boolean(INGEST_KEY)}));
 app.get("/api/agents",(req,res)=>res.json({data:agents,total:agents.length,sourceMode}));
 app.get("/api/agents/:id",(req,res)=>{const r=agents.find(x=>String(x.Agent_ID)===req.params.id);r?res.json(r):res.status(404).json({error:"Agent not found"});});
 app.post("/api/agents",(req,res,next)=>{try{const r=addAgent(req.body);res.status(201).json({data:r});}catch(e){next(e);}});
