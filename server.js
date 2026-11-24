@@ -56,6 +56,7 @@ function normalize(row){
 function isValid(r){return Number.isInteger(r.Agent_ID)&&r.Agent_ID>0&&["A","B"].includes(r.Group)&&numeric.slice(1).every(k=>Number.isFinite(r[k])&&r[k]>=0)&&r.CSAT_Score<=100;}
 function persist(){fs.mkdirSync(DATA_DIR,{recursive:true});fs.writeFileSync(STORE_FILE,JSON.stringify({agents,events:events.slice(0,250),lastSourceSync},null,2));if(pool)persistDatabase().catch(err=>console.error("PostgreSQL persistence error:",err.message));}
 async function persistDatabase(){
+  await pool.query("DELETE FROM agent_records WHERE NOT (agent_id = ANY($1::bigint[]))",[agents.map(agent=>agent.Agent_ID)]);
   for(const agent of agents) await pool.query("INSERT INTO agent_records(agent_id,data,updated_at) VALUES($1,$2::jsonb,NOW()) ON CONFLICT(agent_id) DO UPDATE SET data=EXCLUDED.data,updated_at=NOW()",[agent.Agent_ID,JSON.stringify(agent)]);
   for(const event of events.slice(0,250)) await pool.query("INSERT INTO audit_events(event_id,data,created_at) VALUES($1,$2::jsonb,$3) ON CONFLICT(event_id) DO NOTHING",[event.id,JSON.stringify(event),event.at]);
   await pool.query("DELETE FROM audit_events WHERE created_at < NOW() - INTERVAL '30 days'");
