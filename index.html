@@ -127,5 +127,5 @@ $("refreshApi").onclick=async()=>{if(await refreshApi()){connectStream();log("Ba
 $("startDemo").onclick=async()=>{try{await apiRequest("/api/demo/start",{method:"POST",body:"{}"});await refreshApi();connectStream();addLiveEvent({type:"demo.started",at:new Date().toISOString(),payload:{message:"Simulation started"}})}catch(e){alert(e.message)}};
 $("stopDemo").onclick=async()=>{try{await apiRequest("/api/demo/stop",{method:"POST",body:"{}"});await refreshApi();addLiveEvent({type:"demo.stopped",at:new Date().toISOString(),payload:{message:"Simulation stopped"}})}catch(e){alert(e.message)}};
 renderAll();log("Workspace initialized with "+records.length+" records from the supplied presentation sample.");
-if(apiBase){refreshApi().then(ok=>{if(ok)connectStream()})}else{updateApiView(null);$("apiConnection").textContent="Local sample";$ ("apiConnectionSub").textContent="Browser-only sample data"}
+if(apiBase){refreshApi().then(ok=>{if(ok)connectStream()})}else{updateApiView(null);$("apiConnection").textContent="Local sample";$("apiConnectionSub").textContent="Browser-only sample data"}
 </script></body></html>
