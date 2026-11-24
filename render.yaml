@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: callcentre-iq
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: DATA_DIR
+        value: /opt/render/project/src/data
+      - key: APP_ORIGIN
+        value: "*"
+      - key: DEMO_INTERVAL_MS
+        value: "3500"
