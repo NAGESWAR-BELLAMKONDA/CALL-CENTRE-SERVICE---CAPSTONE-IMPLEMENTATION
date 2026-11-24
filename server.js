@@ -22,6 +22,7 @@ const DATABASE_URL = process.env.DATABASE_URL || "";
 const UPSTREAM_POLL_MS = Math.max(10000, Number(process.env.UPSTREAM_POLL_MS || 30000));
 
 app.disable("x-powered-by");
+app.use((req,res,next)=>{res.setHeader("X-Content-Type-Options","nosniff");res.setHeader("Referrer-Policy","strict-origin-when-cross-origin");next();});
 app.use(cors({ origin: APP_ORIGIN === "*" ? "*" : APP_ORIGIN.split(",").map(x => x.trim()), methods: ["GET","POST","OPTIONS"], allowedHeaders: ["Content-Type","Authorization","X-Ingest-Key"] }));
 app.use(express.json({ limit: "2mb" }));
 
@@ -83,7 +84,7 @@ function requireIngest(req,res,next){if(!INGEST_KEY)return res.status(503).json(
 load();
 (async()=>{try{if(pool)await initDatabase();if(UPSTREAM_URL){await pollUpstream();upstreamTimer=setInterval(pollUpstream,UPSTREAM_POLL_MS);}else startDemo();}catch(err){console.error("Startup data initialisation failed:",err.message);if(!UPSTREAM_URL)startDemo();}})();
 
-app.get("/api/health",(req,res)=>res.json({ok:true,service:"CALLCENTRE IQ API",version:"1.0.0",mode:sourceMode,agents:agents.length,lastSourceSync,uptimeSeconds:Math.round(process.uptime()),serverTime:new Date().toISOString()}));
+app.get("/api/health",(req,res)=>res.json({ok:true,service:"CALLCENTRE IQ API",version:"1.0.0",mode:sourceMode,agents:agents.length,databaseConfigured:Boolean(pool),upstreamConfigured:Boolean(UPSTREAM_URL),lastSourceSync,uptimeSeconds:Math.round(process.uptime()),serverTime:new Date().toISOString()}));
 app.get("/api/config",(req,res)=>res.json({mode:sourceMode,upstreamConfigured:Boolean(UPSTREAM_URL),databaseConfigured:Boolean(pool),demoRunning:Boolean(demoTimer),lastSourceSync,ingestEnabled:Boolean(INGEST_KEY)}));
 app.get("/api/agents",(req,res)=>res.json({data:agents,total:agents.length,sourceMode}));
 app.get("/api/agents/:id",(req,res)=>{const r=agents.find(x=>String(x.Agent_ID)===req.params.id);r?res.json(r):res.status(404).json({error:"Agent not found"});});
@@ -96,6 +97,6 @@ app.post("/api/demo/start",(req,res)=>{startDemo();res.json({success:true,runnin
 app.post("/api/demo/stop",(req,res)=>{stopDemo();res.json({success:true,running:Boolean(demoTimer),mode:sourceMode});});
 app.post("/api/integrations/ingest",requireIngest,(req,res,next)=>{try{const rows=Array.isArray(req.body?.data)?req.body.data:[req.body];const clean=rows.map(normalize);if(clean.some(x=>!isValid(x)))throw Object.assign(new Error("Payload contains invalid records."),{status:400});for(const r of clean){const i=agents.findIndex(x=>x.Agent_ID===r.Agent_ID);if(i>=0){agents[i]={...r,updated_at:new Date().toISOString()};publicEvent("agent.updated",agents[i]);}else addAgent(r);}res.json({success:true,accepted:clean.length});}catch(e){next(e);}});
 app.get("/api/report",(req,res)=>res.json({generatedAt:new Date().toISOString(),title:"Call-Centre Service Performance Analysis Using t-Test for Difference of Means",summary:summary(),sourceMode,disclaimer:"This API reports the current demonstration or configured upstream dataset. Statistical hypothesis testing is performed in the browser using the selected independent-samples t-test."}));
-app.use(express.static(__dirname,{extensions:["html"]}));
+app.get("/",(req,res)=>res.sendFile(path.join(__dirname,"index.html")));
 app.use((err,req,res,next)=>{console.error(err);res.status(err.status||500).json({error:err.message||"Internal server error"});});
 app.listen(PORT,"0.0.0.0",()=>console.log("CALLCENTRE IQ API listening on "+PORT+" | mode="+sourceMode));
